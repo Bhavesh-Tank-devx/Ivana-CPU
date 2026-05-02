@@ -44,7 +44,7 @@ if not log.handlers:
 SERVER_URL      = "http://localhost:8080"
 SERVE_SCRIPT    = Path(__file__).parent / "serve_llama.py"
 MAX_NEW_TOKENS  = 150
-IMAGE_MAX_DIM   = 224
+IMAGE_MAX_DIM   = 112
 CAPTION_PROMPT  = (
     "Describe this jewellery product in detail. "
     "Include: type of jewellery, metal colour, gemstones or diamonds present, "

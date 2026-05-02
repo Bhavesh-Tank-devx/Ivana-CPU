@@ -72,7 +72,7 @@ cmd = [
     "--n_threads_batch", "4",
     "--n_gpu_layers",    "0",
     "--use_mmap",        "true",
-    "--use_mlock",       "false",
+    "--use_mlock",       "true",
     "--chat_format",     "qwen2.5-vl",
 ]
 
