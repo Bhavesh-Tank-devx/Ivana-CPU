@@ -319,7 +319,7 @@ def run_caption(pil_img: Image.Image) -> dict:
     ]}]
 
     payload = {
-        "model":       "Qwen2-VL-2B-Instruct-Q8_0",
+        "model":       "SmolVLM2-2.2B-Instruct-Q8_0.gguf",
         "messages":    messages,
         "max_tokens":  MAX_NEW_TOKENS,
         "temperature": 0.0,
