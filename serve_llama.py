@@ -1,7 +1,7 @@
 #!/usr/bin/env python3.12
 """
-Start a llama.cpp OpenAI-compatible server for SmolVLM2-2.2B-Instruct (Q8_0).
-Downloads GGUF files to /tmp on first run (~2.5 GB total).
+Start a llama.cpp OpenAI-compatible server for SmolVLM-500M-Instruct (Q8_0).
+Downloads GGUF files to /tmp on first run (~500 MB total).
 Builds the llama-server binary from source on first run if not cached.
 
 Usage:
@@ -36,10 +36,11 @@ if not log.handlers:
     log.addHandler(_handler)
 
 # ── Model config ───────────────────────────────────────────────────────────────
-REPO_ID     = "ggml-org/SmolVLM2-2.2B-Instruct-GGUF"
-MODEL_FILE  = "SmolVLM2-2.2B-Instruct-Q8_0.gguf"
-MMPROJ_FILE = "mmproj-SmolVLM2-2.2B-Instruct-Q8_0.gguf"
+REPO_ID     = "ggml-org/SmolVLM-500M-Instruct-GGUF"
+MODEL_FILE  = "SmolVLM-500M-Instruct-Q8_0.gguf"
+MMPROJ_FILE = "mmproj-SmolVLM-500M-Instruct-Q8_0.gguf"
 CACHE_DIR   = Path("/tmp/llama_gguf")
+CHAT_TMPL   = Path("/tmp/smolvlm_chat_template.jinja")
 
 # ── llama-server build config ──────────────────────────────────────────────────
 LLAMA_SRC  = Path("/tmp/llama_src")
@@ -113,10 +114,35 @@ def ensure_server_binary() -> Path:
     return SERVER_BIN
 
 
+SMOLVLM_JINJA = (
+    "<|im_start|>"
+    "{% for message in messages %}"
+    "{{ message['role'] | capitalize }}"
+    "{% if message['content'] is iterable and message['content'] is not string %}"
+        "{% if message['content'][0]['type'] == 'media_marker' %}:{% else %}: {% endif %}"
+        "{% for part in message['content'] %}"
+            "{% if part['type'] == 'text' %}{{ part['text'] }}"
+            "{% elif part['type'] == 'media_marker' %}{{ part['text'] }}"
+            "{% endif %}"
+        "{% endfor %}"
+    "{% else %}: {{ message['content'] }}{% endif %}"
+    "<end_of_utterance>\n"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}Assistant:{% endif %}"
+)
+
+def ensure_chat_template() -> Path:
+    if not CHAT_TMPL.exists():
+        CHAT_TMPL.write_text(SMOLVLM_JINJA, encoding="utf-8")
+        log.info("Wrote SmolVLM chat template to %s", CHAT_TMPL)
+    return CHAT_TMPL
+
+
 log.info("=== serve_llama starting ===")
 model_path  = download_if_missing(MODEL_FILE)
 mmproj_path = download_if_missing(MMPROJ_FILE)
 server_bin  = ensure_server_binary()
+tmpl_path   = ensure_chat_template()
 
 n_threads = str(os.cpu_count() or 4)
 
@@ -124,25 +150,28 @@ cmd = [
     str(server_bin),
     "--model",         str(model_path),
     "--mmproj",        str(mmproj_path),
-    "--host",          "0.0.0.0",
+    "--alias",              "smolvlm-500m",
+    "--jinja",                              # enable Jinja template engine (required for multimodal content parts)
+    "--chat-template-file", str(tmpl_path),
+    "--host",               "0.0.0.0",
     "--port",          "8080",
     # context & batching
-    "--ctx-size",      "4096",
-    "--batch-size",    "512",
-    "--ubatch-size",   "512",
+    # ctx-size covers 729 vision tokens + ~30 prompt + 400 output = ~1160 needed
+    "--ctx-size",      "2048",
+    # batch-size >= vision token count (729) so all image tokens process in one pass
+    "--batch-size",    "1024",
+    "--ubatch-size",   "1024",
     # CPU threading
     "--threads",       n_threads,
     "--threads-batch", n_threads,
+    # mmap is on by default (fast startup); mlock pins weights in RAM (no swap)
+    "--mmap",
+    "--mlock",
     # no GPU
     "--n-gpu-layers",  "0",
     # server throughput
     "--cont-batching",
-    "--flash-attn", "on",
-    "--chat-template", "smolvlm",
-    "--no-jinja",
-    # quantised KV cache — halves memory with minimal quality loss
-    "--cache-type-k",  "q8_0",
-    "--cache-type-v",  "q8_0",
+    "--flash-attn", "on"
 ]
 
 log.info("Starting llama-server: %s", " ".join(cmd))

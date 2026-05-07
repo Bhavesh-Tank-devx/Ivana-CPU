@@ -43,10 +43,10 @@ if not log.handlers:
 
 SERVER_URL      = "http://localhost:8080"
 SERVE_SCRIPT    = Path(__file__).parent / "serve_llama.py"
-MAX_NEW_TOKENS  = 150
-IMAGE_MAX_DIM   = 112
+MAX_NEW_TOKENS  = 400
+IMAGE_MAX_DIM   = 384
 CAPTION_PROMPT  = (
-    "Describe this jewellery product in detail. "
+    # "Describe this jewellery product in detail. "
     "Include: type of jewellery, metal colour, gemstones or diamonds present, "
     "setting style, design features, and overall aesthetic."
 )
@@ -241,7 +241,7 @@ st.markdown("""
   <span class="nav-brand">Ivana</span>
   <span class="nav-x">×</span>
   <span class="nav-brand">Devx</span>
-  <span class="nav-sub">Caption Demo · Qwen2-VL-2B · llama.cpp · CPU Q8_0</span>
+  <span class="nav-sub">Caption Demo · SmolVLM-500M · llama.cpp · CPU Q8_0</span>
 </div>
 <div class="gold-rule"></div>
 """, unsafe_allow_html=True)
@@ -319,11 +319,12 @@ def run_caption(pil_img: Image.Image) -> dict:
     ]}]
 
     payload = {
-        "model":       "SmolVLM2-2.2B-Instruct-Q8_0.gguf",
-        "messages":    messages,
-        "max_tokens":  MAX_NEW_TOKENS,
-        "temperature": 0.0,
-        "stream":      True,
+        "model":            "smolvlm-500m",
+        "messages":         messages,
+        "max_tokens":       MAX_NEW_TOKENS,
+        "temperature":      0.3,
+        "repeat_penalty":   1.2,
+        "stream":           True,
     }
 
     ttft_ms  = None
@@ -414,7 +415,7 @@ with col_main:
             log.info("Server not ready — showing loading state, will rerun in 4s")
             status_ph.markdown(
                 '<div class="model-loading">⏳ &nbsp;Starting llama.cpp server — '
-                'first run downloads ~2.4 GB to /tmp …</div>',
+                'first run downloads ~500 MB to /tmp …</div>',
                 unsafe_allow_html=True,
             )
             time.sleep(4)
@@ -422,7 +423,7 @@ with col_main:
 
     status_ph.markdown(
         '<div class="model-loaded">✓ &nbsp;llama.cpp server ready · '
-        'Qwen2-VL-2B · Q8_0 · CPU · port 8080</div>',
+        'SmolVLM-500M · Q8_0 · CPU · port 8080</div>',
         unsafe_allow_html=True,
     )
 
