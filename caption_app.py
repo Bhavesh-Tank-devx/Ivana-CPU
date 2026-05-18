@@ -19,6 +19,7 @@ import logging.handlers
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import requests
@@ -41,15 +42,125 @@ log.setLevel(logging.DEBUG)
 if not log.handlers:
     log.addHandler(_handler)
 
-SERVER_URL      = "http://localhost:8080"
-SERVE_SCRIPT    = Path(__file__).parent / "serve_llama.py"
-MAX_NEW_TOKENS  = 400
-IMAGE_MAX_DIM   = 384
-CAPTION_PROMPT  = (
-    # "Describe this jewellery product in detail. "
-    "Include: type of jewellery, metal colour, gemstones or diamonds present, "
-    "setting style, design features, and overall aesthetic."
-)
+SERVER_URL     = "http://localhost:8080"
+SERVE_SCRIPT   = Path(__file__).parent / "serve_llama.py"
+MAX_NEW_TOKENS = 280
+IMAGE_MAX_DIM  = 384
+
+# ── Request archive ───────────────────────────────────────────────────────────
+REQUEST_LOG_DIR  = Path(__file__).parent / "requests_log"
+REQUEST_IMAGES   = REQUEST_LOG_DIR / "images"
+REQUEST_JSONL    = REQUEST_LOG_DIR / "requests.jsonl"
+
+REQUEST_LOG_DIR.mkdir(exist_ok=True)
+REQUEST_IMAGES.mkdir(exist_ok=True)
+
+SYSTEM_PROMPT = """\
+You are an expert ring attribute extractor with deep knowledge of gemology and fine jewellery design. \
+Every image you receive is a close-up photograph of a RING. Your task is to examine it precisely and \
+output its visual attributes as a JSON object.
+
+CRITICAL VISUAL CHECKS — read these before labeling every field:
+
+stone_shape — measure the outline of the center stone carefully which is most prominant in the ring:
+  • round    — perfectly circular; width and height are equal. If the stone is elongated AT ALL, it is not round.
+  • oval     — ellipse longer than wide; length:width ratio roughly 1.3–1.5
+  • princess — square outline with sharp 90-degree corners; no rounding
+  • cushion  — square or rectangular with noticeably rounded corners; pillow-like silhouette
+  • pear     — teardrop; one pointed tip and one fully rounded end
+  • marquise — eye or football shape; two pointed ends, widest in the middle
+  • emerald  — rectangle with clipped corners; step-cut facets visible as concentric tiers/steps
+  • radiant  — rectangle or square with clipped corners; brilliant-cut (sparkly) not step-cut
+  • heart    — clear heart silhouette with a cleft at the top centre
+  • asscher  — square step-cut with heavily clipped corners; nearly octagonal outline
+  Rule: if the stone is longer in any direction than it is wide, rule out "round" immediately.
+
+stone_arrangement — how stones are laid out on the ring:
+  • solitaire   — one center stone, plain or minimal band, no surrounding stones
+  • halo        — center stone encircled by a ring of smaller accent stones
+  • pavé        — band surface densely covered with small stones flush to the metal
+  • cluster     — group of stones close together without a single dominant center
+  • three-stone — exactly three prominent stones in a row (past-present-future style)
+  • eternity    — stones run continuously all the way around the band
+  • other       — any arrangement that doesn't fit the above categories, e.g. scattered random stones, asymmetrical designs, etc.
+  • none        — no stones at all
+
+band_metal — judge strictly by visible color:
+  • yellow gold  — warm yellow/amber tone
+  • white gold   — cool silver-white tone with slightly warm undertone
+  • rose gold    — distinct pink or copper-rose tone
+  • silver       — cool grey-white, less brilliant than white gold
+  • platinum     — cool grey-white, slightly darker/heavier-looking than white gold
+  • mixed        — two or more metal colors clearly visible on the same ring
+  • unknown      — metal color is ambiguous or not visible
+
+setting_style — how the center stone is secured:
+  • prong     — 4 or 6 small metal claws grip the stone; stone is raised; visible from the side
+  • bezel     — a continuous metal rim wraps entirely around the stone's edge
+  • channel   — stones sit between two parallel metal rails; no prongs visible between stones
+  • tension   — stone appears to float; held purely by spring pressure from two band ends
+  • pavé      — tiny stones set very close with micro-prongs; surface looks paved/embedded
+  • flush     — stone sits level with the metal surface, fully sunk in
+  • invisible — stones fit edge-to-edge with no metal visible between them from above
+
+Output ONLY a JSON object — no prose, no markdown fences, no explanation.
+
+Allowed values per field (pick exactly one):
+  band_metal:        yellow gold | white gold | rose gold | silver | platinum | mixed | unknown
+  band_style:        plain | twisted | split-shank | bypass | tapered | braided | unknown
+  band_width:        thin | medium | wide | statement
+  band_texture:      smooth | hammered | engraved | milgrain | braided | none
+  band_finish:       polished | matte | brushed | satin | unknown
+  stone_arrangement: solitaire | halo | pavé | cluster | three-stone | eternity | none
+  stone_count:       single | two-stone | three-stone | multi | eternity | none
+  center_stone:      diamond | ruby | emerald | sapphire | pearl | opal | amethyst | garnet | topaz | none
+  stone_shape:       round | oval | princess | cushion | pear | marquise | emerald | radiant | heart | asscher | none
+  stone_color:       clear | red | blue | green | pink | purple | yellow | orange | multicolor | none
+  setting_style:     prong | bezel | channel | tension | pavé | flush | invisible | none
+  accent_stones:     diamond | sapphire | ruby | emerald | mixed | none
+  filigree:          yes | no
+  milgrain:          yes | no
+  occasion:          engagement | wedding | everyday | cocktail | fashion
+  profile:           flat | comfort-fit | domed | knife-edge | unknown
+
+Now examine the ring image carefully and output only the JSON object.\
+"""
+
+RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "ring_attributes",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "band_metal","band_style","band_width","band_texture",
+                "band_finish","stone_arrangement","stone_count","center_stone",
+                "stone_shape","stone_color","setting_style","accent_stones",
+                "filigree","milgrain","occasion","profile",
+            ],
+            "properties": {
+                "band_metal":        {"type":"string","enum":["yellow gold","white gold","rose gold","silver","platinum","mixed","unknown"]},
+                "band_style":        {"type":"string","enum":["plain","twisted","split-shank","bypass","tapered","braided","unknown"]},
+                "band_width":        {"type":"string","enum":["thin","medium","wide","statement"]},
+                "band_texture":      {"type":"string","enum":["smooth","hammered","engraved","milgrain","braided","none"]},
+                "band_finish":       {"type":"string","enum":["polished","matte","brushed","satin","unknown"]},
+                "stone_arrangement": {"type":"string","enum":["solitaire","halo","pavé","cluster","three-stone","eternity","none"]},
+                "stone_count":       {"type":"string","enum":["single","two-stone","three-stone","multi","eternity","none"]},
+                "center_stone":      {"type":"string","enum":["diamond","ruby","emerald","sapphire","pearl","opal","amethyst","garnet","topaz","none"]},
+                "stone_shape":       {"type":"string","enum":["round","oval","princess","cushion","pear","marquise","emerald","radiant","heart","asscher","none"]},
+                "stone_color":       {"type":"string","enum":["clear","red","blue","green","pink","purple","yellow","orange","multicolor","none"]},
+                "setting_style":     {"type":"string","enum":["prong","bezel","channel","tension","pavé","flush","invisible","none"]},
+                "accent_stones":     {"type":"string","enum":["diamond","sapphire","ruby","emerald","mixed","none"]},
+                "filigree":          {"type":"string","enum":["yes","no"]},
+                "milgrain":          {"type":"string","enum":["yes","no"]},
+                "occasion":          {"type":"string","enum":["engagement","wedding","everyday","cocktail","fashion"]},
+                "profile":           {"type":"string","enum":["flat","comfort-fit","domed","knife-edge","unknown"]},
+            },
+        },
+    },
+}
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -270,7 +381,12 @@ def _is_server_up() -> bool:
 
 
 @st.cache_resource(show_spinner=False)
-def _launch_server() -> subprocess.Popen:
+def _launch_server() -> subprocess.Popen | None:
+    check = subprocess.run(["pgrep", "-f", "serve_llama.py"], capture_output=True)
+    if check.returncode == 0:
+        pids = check.stdout.decode().strip().split()
+        log.info("serve_llama.py already running (pids=%s), skipping launch", pids)
+        return None
     log.info("Launching llama.cpp server: %s", SERVE_SCRIPT)
     proc = subprocess.Popen(
         [sys.executable, str(SERVE_SCRIPT)],
@@ -297,41 +413,82 @@ def _to_data_uri(img: Image.Image) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+# ── Request archive ───────────────────────────────────────────────────────────
+
+def _save_request_log(
+    pil_img: Image.Image,
+    original_filename: str,
+    result: dict,
+) -> str:
+    """Save image + result to requests_log/; append one line to requests.jsonl.
+
+    Returns the request_id so callers can reference it in log messages.
+    """
+    ts        = time.strftime("%Y%m%d_%H%M%S")
+    req_id    = f"{ts}_{uuid.uuid4().hex[:6]}"
+
+    img_path  = REQUEST_IMAGES / f"{req_id}.jpg"
+    pil_img.save(img_path, format="JPEG", quality=95)
+
+    record = {
+        "request_id":      req_id,
+        "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "original_filename": original_filename,
+        "image_path":      str(img_path.relative_to(REQUEST_LOG_DIR)),
+        "image_size":      {"width": pil_img.width, "height": pil_img.height},
+        "timing": {
+            "preprocess_ms": round(result["preprocess_ms"], 1),
+            "ttft_ms":       round(result["ttft_ms"], 1),
+            "decode_tok_s":  round(result["decode_tok_s"], 2),
+            "total_s":       round(result["total_s"], 3),
+            "n_out_tokens":  result["n_out_tokens"],
+        },
+        "raw_response":  result["raw_text"],
+        "attributes":    result["attributes"],
+        "parse_ok":      result["attributes"] is not None,
+    }
+
+    with REQUEST_JSONL.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    log.info(
+        "ARCHIVED  req_id=%s  image=%s  parse_ok=%s  total=%.2fs",
+        req_id, img_path.name, record["parse_ok"], result["total_s"],
+    )
+    return req_id
+
+
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def run_caption(pil_img: Image.Image) -> dict:
     orig_w, orig_h = pil_img.size
     img = _resize(pil_img)
-    resized_w, resized_h = img.size
-    log.info(
-        "REQUEST  original=%dx%d  resized=%dx%d  max_tokens=%d",
-        orig_w, orig_h, resized_w, resized_h, MAX_NEW_TOKENS,
-    )
+    log.info("REQUEST  original=%dx%d  resized=%dx%d", orig_w, orig_h, *img.size)
 
     t_pre = time.perf_counter()
     data_uri = _to_data_uri(img)
     preprocess_ms = (time.perf_counter() - t_pre) * 1000
     log.debug("Preprocess (resize+encode): %.1f ms", preprocess_ms)
 
-    messages = [{"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": data_uri}},
-        {"type": "text", "text": CAPTION_PROMPT},
-    ]}]
-
     payload = {
-        "model":            "smolvlm-500m",
-        "messages":         messages,
-        "max_tokens":       MAX_NEW_TOKENS,
-        "temperature":      0.3,
-        "repeat_penalty":   1.2,
-        "stream":           True,
+        "model": "smolvlm-500m",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": [
+                {"type": "image_url", "image_url": {"url": data_uri}},
+            ]},
+        ],
+        "max_tokens":      MAX_NEW_TOKENS,
+        "temperature":     0.1,
+        "repeat_penalty":  1.0,
+        "response_format": RESPONSE_FORMAT,
+        "stream":          True,
     }
 
-    ttft_ms  = None
+    ttft_ms: float | None = None
     chunks: list[str] = []
-    t_gen    = time.perf_counter()
+    t_gen = time.perf_counter()
 
-    log.debug("POST %s/v1/chat/completions (stream=True)", SERVER_URL)
     try:
         with requests.post(
             f"{SERVER_URL}/v1/chat/completions",
@@ -339,7 +496,6 @@ def run_caption(pil_img: Image.Image) -> dict:
             stream=True,
             timeout=180,
         ) as resp:
-            log.debug("Response status: %s", resp.status_code)
             resp.raise_for_status()
             for raw in resp.iter_lines():
                 if not raw:
@@ -349,7 +505,6 @@ def run_caption(pil_img: Image.Image) -> dict:
                     continue
                 data = line[6:]
                 if data.strip() == "[DONE]":
-                    log.debug("Stream complete ([DONE] received)")
                     break
                 try:
                     delta = json.loads(data)["choices"][0]["delta"].get("content", "")
@@ -368,30 +523,40 @@ def run_caption(pil_img: Image.Image) -> dict:
         log.error("Request failed: %s", exc)
         raise
 
-    total_s     = time.perf_counter() - t_gen
-    description = "".join(chunks)
-    n_out       = len(chunks)
-    ttft_s      = (ttft_ms or 0.0) / 1000
-    decode_s    = total_s - ttft_s
-    tok_per_sec = n_out / decode_s if decode_s > 0 else 0.0
+    total_s   = time.perf_counter() - t_gen
+    raw_text  = "".join(chunks).strip()
+    n_out     = len(chunks)
+    ttft_s    = (ttft_ms or 0.0) / 1000
+    decode_s  = total_s - ttft_s
+    tok_per_s = n_out / decode_s if decode_s > 0 else 0.0
 
-    target_met = total_s <= 6.0
     log.info(
-        "RESULT   preprocess=%.0fms  ttft=%.0fms  decode=%.2ftok/s  "
-        "total=%.2fs  tokens=%d  target=%s",
-        preprocess_ms, ttft_ms or 0.0, tok_per_sec,
-        total_s, n_out, "PASS" if target_met else "FAIL",
+        "RESULT   preprocess=%.0fms  ttft=%.0fms  decode=%.2ftok/s  total=%.2fs  tokens=%d",
+        preprocess_ms, ttft_ms or 0.0, tok_per_s, total_s, n_out,
     )
-    log.debug("Description: %.200s", description)
+    log.debug("Raw model output: %.300s", raw_text)
+
+    clean = raw_text
+    if clean.startswith("```"):
+        clean = clean.split("```")[1]
+        if clean.startswith("json"):
+            clean = clean[4:]
+        clean = clean.strip()
+
+    try:
+        attributes = json.loads(clean)
+    except json.JSONDecodeError as exc:
+        log.error("Model returned invalid JSON: %s | raw=%.300s", exc, raw_text)
+        attributes = None
 
     return {
-        "description":    description,
-        "preprocess_ms":  preprocess_ms,
-        "ttft_ms":        ttft_ms or 0.0,
-        "decode_tok_s":   tok_per_sec,
-        "total_s":        total_s,
-        "n_out_tokens":   n_out,
-        "target_met":     target_met,
+        "attributes":   attributes,
+        "raw_text":     raw_text,
+        "preprocess_ms": preprocess_ms,
+        "ttft_ms":       ttft_ms or 0.0,
+        "decode_tok_s":  tok_per_s,
+        "total_s":       total_s,
+        "n_out_tokens":  n_out,
     }
 
 
@@ -467,6 +632,9 @@ with col_main:
                     st.error(f"Inference error: {exc}")
                     st.stop()
 
+            req_id = _save_request_log(img, uploaded.name, result)
+            log.info("Request complete  req_id=%s  file=%s", req_id, uploaded.name)
+
             # ── Timing metrics row ─────────────────────────────────────────
             st.markdown('<div class="section-label">Timing Breakdown</div>', unsafe_allow_html=True)
 
@@ -512,19 +680,46 @@ with col_main:
                   <div class="metric-label">Output</div>
                 </div>""", unsafe_allow_html=True)
 
-            # ── Target badge ───────────────────────────────────────────────
+            # ── Attributes ────────────────────────────────────────────────
             st.markdown("<br>", unsafe_allow_html=True)
-            badge = (
-                '<span class="badge-pass">✓ Within 6s target</span>'
-                if result["target_met"] else
-                f'<span class="badge-fail">✗ Over target — {result["total_s"]:.1f}s vs 6s</span>'
-            )
-            st.markdown(badge, unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Extracted Attributes</div>', unsafe_allow_html=True)
 
-            # ── Description ────────────────────────────────────────────────
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<div class="section-label">Generated Description</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="desc-box">{result["description"]}</div>',
-                unsafe_allow_html=True,
-            )
+            attrs = result["attributes"]
+            if attrs is None:
+                st.error("Model did not return valid JSON.")
+                st.code(result["raw_text"], language="text")
+            else:
+                FIELD_LABELS = {
+                    "item_type":         "Item Type",
+                    "band_metal":        "Band Metal",
+                    "band_style":        "Band Style",
+                    "band_width":        "Band Width",
+                    "band_texture":      "Band Texture",
+                    "band_finish":       "Band Finish",
+                    "stone_arrangement": "Stone Arrangement",
+                    "stone_count":       "Stone Count",
+                    "center_stone":      "Center Stone",
+                    "stone_shape":       "Stone Shape",
+                    "stone_color":       "Stone Color",
+                    "setting_style":     "Setting Style",
+                    "accent_stones":     "Accent Stones",
+                    "filigree":          "Filigree",
+                    "milgrain":          "Milgrain",
+                    "occasion":          "Occasion",
+                    "profile":           "Profile",
+                }
+                rows = list(FIELD_LABELS.items())
+                for i in range(0, len(rows), 3):
+                    cols = st.columns(3)
+                    for col, (key, label) in zip(cols, rows[i:i+3]):
+                        value = attrs.get(key, "—")
+                        with col:
+                            st.markdown(f"""
+                            <div class="metric-card" style="text-align:left;padding:0.9rem 1.2rem;">
+                              <div class="metric-label">{label}</div>
+                              <div style="font-family:'Jost',sans-serif;font-size:0.88rem;
+                                          font-weight:400;color:#1A1410;margin-top:0.3rem;">
+                                {value}
+                              </div>
+                            </div>""", unsafe_allow_html=True)
+                    st.markdown("<div style='margin-bottom:0.6rem'></div>", unsafe_allow_html=True)
