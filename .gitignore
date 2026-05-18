@@ -11,3 +11,5 @@ caption.log.*
 
 # Streamlit
 .streamlit/secrets.toml
+
+data/
