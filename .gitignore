@@ -13,3 +13,4 @@ caption.log.*
 .streamlit/secrets.toml
 
 data/
+batch_results/
