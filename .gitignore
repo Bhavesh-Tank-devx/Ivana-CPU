@@ -4,6 +4,16 @@ __pycache__/
 .env
 .venv/
 venv/
+venv_yolo/
+
+# Model weights (large binaries)
+*.pt
+
+# YOLO / OpenVINO generated artifacts
+*_openvino_model/
+bbox_results/
+bbox_results_optimized/
+benchmark_results/
 
 # Log files
 caption.log
