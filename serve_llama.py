@@ -1,8 +1,9 @@
 #!/usr/bin/env python3.12
 """
-Start a llama.cpp OpenAI-compatible server for SmolVLM-500M-Instruct (Q8_0).
-Downloads GGUF files to /tmp on first run (~500 MB total).
+Start a llama.cpp OpenAI-compatible server for MiniCPM-V 4.6 (Q4_K_M).
+Downloads GGUF files to /tmp on first run (~1.3 GB total).
 Builds the llama-server binary from source on first run if not cached.
+Requires llama.cpp >= b9049 for MiniCPM-V 4.6 support (auto-rebuilds if stale).
 
 Usage:
     HF_TOKEN=<token> python3.12 serve_llama.py
@@ -14,6 +15,7 @@ OpenAI-compatible endpoint: POST /v1/chat/completions
 import logging
 import logging.handlers
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,15 +38,18 @@ if not log.handlers:
     log.addHandler(_handler)
 
 # ── Model config ───────────────────────────────────────────────────────────────
-REPO_ID     = "ggml-org/SmolVLM-500M-Instruct-GGUF"
-MODEL_FILE  = "SmolVLM-500M-Instruct-Q8_0.gguf"
-MMPROJ_FILE = "mmproj-SmolVLM-500M-Instruct-Q8_0.gguf"
+REPO_ID     = "ggml-org/MiniCPM-V-4.6-GGUF"
+MODEL_FILE  = "MiniCPM-V-4.6-Q4_K_M.gguf"
+MMPROJ_FILE = "mmproj-MiniCPM-V-4.6-Q8_0.gguf"
+MODEL_ALIAS = "minicpmv-4.6"
 CACHE_DIR   = Path("/tmp/llama_gguf")
-CHAT_TMPL   = Path("/tmp/smolvlm_chat_template.jinja")
 
 # ── llama-server build config ──────────────────────────────────────────────────
-LLAMA_SRC  = Path("/tmp/llama_src")
-SERVER_BIN = CACHE_DIR / "llama-server"
+# Bump BUILD_TAG to force a fresh clone + rebuild (e.g. when min version changes).
+BUILD_TAG      = "minicpmv46"   # requires llama.cpp >= b9049
+BUILD_TAG_FILE = CACHE_DIR / ".build_tag"
+LLAMA_SRC      = Path("/tmp/llama_src")
+SERVER_BIN     = CACHE_DIR / "llama-server"
 
 
 def download_if_missing(filename: str) -> Path:
@@ -74,29 +79,35 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 def ensure_server_binary() -> Path:
+    # Invalidate cached binary if it predates MiniCPM-V 4.6 support
     if SERVER_BIN.exists():
-        log.info("llama-server binary found: %s", SERVER_BIN)
-        return SERVER_BIN
+        tag_ok = BUILD_TAG_FILE.exists() and BUILD_TAG_FILE.read_text().strip() == BUILD_TAG
+        if tag_ok:
+            log.info("llama-server binary found (%s): %s", BUILD_TAG, SERVER_BIN)
+            return SERVER_BIN
+        log.info("Stale binary (tag mismatch) — rebuilding for MiniCPM-V 4.6 support (b9049+)")
+        SERVER_BIN.unlink()
 
     log.info("Building llama-server from source (one-time, ~5 min) …")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     n_jobs = str(os.cpu_count() or 4)
 
-    if not LLAMA_SRC.exists():
-        _run([
-            "git", "clone", "--depth=1",
-            "https://github.com/ggerganov/llama.cpp",
-            str(LLAMA_SRC),
-        ])
-    else:
-        log.info("Source already cloned at %s, skipping clone", LLAMA_SRC)
+    # Fresh clone to guarantee we have >= b9049
+    if LLAMA_SRC.exists():
+        log.info("Removing stale source tree for fresh clone")
+        shutil.rmtree(LLAMA_SRC)
+    _run([
+        "git", "clone", "--depth=1",
+        "https://github.com/ggml-org/llama.cpp",
+        str(LLAMA_SRC),
+    ])
 
     build_dir = LLAMA_SRC / "build"
     _run([
         "cmake", "-B", str(build_dir),
         "-DCMAKE_BUILD_TYPE=Release",
-        "-DBUILD_SHARED_LIBS=OFF",   # static: no external lib deps at runtime
-        "-DGGML_NATIVE=ON",          # compile for this CPU (AVX2/FMA enabled)
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DGGML_NATIVE=ON",          # AVX2/FMA for AMD EPYC 7R13
         "-DLLAMA_BUILD_TESTS=OFF",
         "-DLLAMA_BUILD_EXAMPLES=OFF",
     ], cwd=LLAMA_SRC)
@@ -110,68 +121,41 @@ def ensure_server_binary() -> Path:
 
     built = build_dir / "bin" / "llama-server"
     built.rename(SERVER_BIN)
+    BUILD_TAG_FILE.write_text(BUILD_TAG)
     log.info("llama-server built and cached at %s", SERVER_BIN)
     return SERVER_BIN
 
 
-SMOLVLM_JINJA = (
-    "<|im_start|>"
-    "{% for message in messages %}"
-    "{{ message['role'] | capitalize }}"
-    "{% if message['content'] is iterable and message['content'] is not string %}"
-        "{% if message['content'][0]['type'] == 'media_marker' %}:{% else %}: {% endif %}"
-        "{% for part in message['content'] %}"
-            "{% if part['type'] == 'text' %}{{ part['text'] }}"
-            "{% elif part['type'] == 'media_marker' %}{{ part['text'] }}"
-            "{% endif %}"
-        "{% endfor %}"
-    "{% else %}: {{ message['content'] }}{% endif %}"
-    "<end_of_utterance>\n"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}Assistant:{% endif %}"
-)
-
-def ensure_chat_template() -> Path:
-    if not CHAT_TMPL.exists():
-        CHAT_TMPL.write_text(SMOLVLM_JINJA, encoding="utf-8")
-        log.info("Wrote SmolVLM chat template to %s", CHAT_TMPL)
-    return CHAT_TMPL
-
-
-log.info("=== serve_llama starting ===")
+log.info("=== serve_llama starting (MiniCPM-V 4.6 Q4_K_M) ===")
 model_path  = download_if_missing(MODEL_FILE)
 mmproj_path = download_if_missing(MMPROJ_FILE)
 server_bin  = ensure_server_binary()
-tmpl_path   = ensure_chat_template()
 
 n_threads = str(os.cpu_count() or 4)
 
 cmd = [
     str(server_bin),
-    "--model",         str(model_path),
-    "--mmproj",        str(mmproj_path),
-    "--alias",              "smolvlm-500m",
-    "--jinja",                              # enable Jinja template engine (required for multimodal content parts)
-    "--chat-template-file", str(tmpl_path),
-    "--host",               "0.0.0.0",
-    "--port",          "8080",
-    # context & batching
-    # ctx-size covers 729 vision tokens + ~30 prompt + 400 output = ~1160 needed
-    "--ctx-size",      "2048",
-    # batch-size >= vision token count (729) so all image tokens process in one pass
-    "--batch-size",    "1024",
-    "--ubatch-size",   "1024",
-    # CPU threading
-    "--threads",       n_threads,
-    "--threads-batch", n_threads,
-    # mmap is on by default (fast startup); mlock pins weights in RAM (no swap)
+    "--model",          str(model_path),
+    "--mmproj",         str(mmproj_path),
+    "--alias",          MODEL_ALIAS,
+    "--jinja",                           # use the model's embedded chat template
+    "--host",           "0.0.0.0",
+    "--port",           "8080",
+    # context: SigLIP2 at 384px → ~64 vision tokens + prompt + 200 output
+    "--ctx-size",       "2048",
+    "--batch-size",     "1024",
+    "--ubatch-size",    "1024",
+    # CPU threading — use all 4 vCPUs
+    "--threads",        n_threads,
+    "--threads-batch",  n_threads,
+    # memory
     "--mmap",
     "--mlock",
     # no GPU
-    "--n-gpu-layers",  "0",
-    # server throughput
+    "--n-gpu-layers",   "0",
     "--cont-batching",
-    "--flash-attn", "on"
+    "--flash-attn", "off",   # CPU-only; explicit value required in newer llama.cpp
+    "--reasoning", "off",    # disable thinking mode — instruct checkpoint, not thinking variant
 ]
 
 log.info("Starting llama-server: %s", " ".join(cmd))
